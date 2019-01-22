@@ -107,7 +107,7 @@ function mmlong_readcoverage_minimap2 {
   
   # Map pseudo matepairs to assembly  
   $MINIMAP2 -t $NT -ax $MMM $ASMB $READ |\
-  $SAMTOOLS view -@ $NT -q 10 -b -F 0x904 - |\
+  $SAMTOOLS view -@ $NT -b -F 0x104 - |\
   $SAMTOOLS sort -@ $NT - > $OUT/${READ_NAME}_cov.bam
 }
 

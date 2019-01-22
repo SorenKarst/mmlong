@@ -2,7 +2,7 @@
 # mmlong miniasm-racon
 # By Søren Karst and Rasmus Kirkegaard
 # Version
-MINIASN_RACON_VERSION=0.1.1
+MINIASN_RACON_VERSION=0.1.2
 
 ################################################################################
 ### Preparation ----------------------------------------------------------------
@@ -21,6 +21,7 @@ where:
     -o  Output folder. 
     -l  Minimum contig length.
     -r  Rounds of racon polishing.
+    -c  Keep racon coverage information.
     -t  Number of threads. Default is 40.
     -x  Run script on mmlong reassembly output assuming metaflow folder structure. 
 "
@@ -109,8 +110,8 @@ function miniasm_assembly {
   printf "\nMiniasm assembly using [`echo $DL | tr -d '\n'`] \n\n"
   # Concatenate assembly data
   printf "\nConcatenate read data\n\n"
-  if [ ! -f "$OD/np_all.fq" ]; then
-    cat $(echo "$DL" | sed -e "s/^/$DD\\//" -e "s/$/*/" ) > $OD/np_all.fq
+  if [[ ! -f "$OD/np_all.fq" && -n "$DL" ]]; then
+    cat $(echo "$DL" | sed -e "s@^@$DD\\/@" -e "s/$/.f*/" ) > $OD/np_all.fq
   fi
   # Read-read mapping
   printf "\nMinimap read-read mapping\n\n"
@@ -158,7 +159,7 @@ if [ -z ${XRUN+x} ]; then
   racon_polishing assembly_miniasm.fa $OUT_DIR $NRACON $THREADS
 fi
 
-# Batch mode
+# Batch mode - NB: Might not be working
 if [ "$XRUN" = "YES" ]; then
   for BIN_PATH in reassembly/*; do
     DATA_DIR=$BIN_PATH/data

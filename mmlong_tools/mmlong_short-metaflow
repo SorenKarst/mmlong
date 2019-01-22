@@ -2,7 +2,7 @@
 # mmlong short-metaflow
 # By Søren Karst and Rasmus Kirkegaard
 # Version
-SHORT_METAFLOW_VERSION=0.1.3
+SHORT_METAFLOW_VERSION=0.1.4
 
 ################################################################################
 ### Preparation ----------------------------------------------------------------
@@ -25,8 +25,15 @@ where:
     -t  Number of threads to use.
     -k  Keep temporary files.
 
-Example command: mmlong ilm-metaflow -d data -a ilm_asmb.txt -i ilm_cov.txt -t 40 -k
+Example command: mmlong short-metaflow -d data -a ilm_asmb.txt -i ilm_cov.txt -t 40 -k
 "
+### Customizable Arguments -----------------------------------------------------
+
+# Adaptors
+NEX_ADP1=CTGTCTCTTATACACATCT # Illumina Nextera adaptor sequences
+NEX_ADP2=CTGTCTCTTATACACATCT # Illumina Nextera adaptor sequences
+TRU_ADP1=AGATCGGAAGAGCACACGTCTGAACTCCAGTCA # Illumina TruSeq and NEB Nebnext adaptor sequences
+TRU_ADP2=AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT # Illumina TruSeq and NEB Nebnext adaptor sequences
 
 ### Terminal Arguments ---------------------------------------------------------
 
@@ -39,32 +46,23 @@ while getopts ':hzd:a:i:t:k' OPTION; do
     a) ILM_ASMB=`cat $OPTARG`;;
     i) ILM_COV=`cat $OPTARG`;;
     t) THREADS=$OPTARG;;
-    k) KEEP=YES;;
+    k) KEEP="YES";;
     :) printf "missing argument for -$OPTARG\n" >&2; exit 1;;
     \?) printf "invalid option for -$OPTARG\n" >&2; exit 1;;
   esac
 done
 
 # Check missing arguments
-if [ -z ${DATA_DIR+x} ]; then
-  printf "\n -d not defined. Specify data folder.\n\n"
-  echo "$USAGE"
-  exit 1
-fi
-if [ -z ${ILM_ASMB+x} ]; then
-  printf "\n -a not defined. Specify Illumina data list for assembly.\n\n"
-  echo "$USAGE"
-  exit 1
-fi
-if [ -z ${ILM_COV+x} ]; then
-  printf "\n -i not defined. Specify Illumina data list for read coverage estimates.\n\n"
-  echo "$USAGE"
-  exit 1
-fi
+MISSING="is missing but required. Exiting."
+if [ -z ${DATA_DIR+x} ]; then echo "-d $MISSING"; echo "$USAGE"; exit 1; fi;
+if [ -z ${ILM_ASMB+x} ]; then echo "-a $MISSING"; echo "$USAGE"; exit 1; fi;
+if [ -z ${ILM_COV+x} ]; then echo "-i $MISSING"; echo "$USAGE"; exit 1; fi;
 if [ -z ${PF+x} ]; then PF=NO; fi;
 if [ -z ${THREADS+x} ]; then THREADS=40; fi;
-if [ -z ${KEEP+x} ]; then KEEP=NO; fi;
+if [ -z ${KEEP+x} ]; then KEEP="NO"; fi;
 
+### Data names
+ILM_ALL=`printf "$ILM_COV""\n""$ILM_ASMB""\n" | sort | uniq`
 
 ### Path to dependencies
 . $MMLONG_DIR/mmlong_tools/dependencies.sh
@@ -73,7 +71,6 @@ if [ -z ${KEEP+x} ]; then KEEP=NO; fi;
 ### Log settings ---------------------------------------------------------------
 ################################################################################
 
-function logging {
   LOG_NAME="mmlong_short-metaflow_log_$(date +%s).txt"
   exec > >(tee -a $LOG_NAME)
   exec 2>&1
@@ -82,30 +79,20 @@ function logging {
   echo "Settings:
   Script version: 	$SHORT_METAFLOW_VERSION
   Script call: 		$0 $*
-  Data folder:		$DATA_DIR
+  Data directory:	$DATA_DIR
   Ilm assembly list:	$ILM_ASMB
   Ilm coverage list:	$ILM_COV
-  Keep temp files:	$KEEP
-  CPU threads:		$THREADS" >> $LOG_NAME
-}
+  CPU threads:		$THREADS
+  Run using -k: 	$KEEP" >> $LOG_NAME
 
 ################################################################################
 ### Workflow -------------------------------------------------------------------
 ################################################################################
-logging
-
-### Data names
-ILM_ALL=`printf "$ILM_COV""\n""$ILM_ASMB""\n" | sort | uniq`
 
 ### Read trimming and filtering-------------------------------------------------
 if [ ! -d "trimmed_data" ]; then
+printf "\n# Read trimming and filtering-------------------------------------\n\n"
 mkdir -p trimmed_data
-
-# Adaptors
-NEX_ADP1=CTGTCTCTTATACACATCT # Illumina Nextera adaptor sequences
-NEX_ADP2=CTGTCTCTTATACACATCT # Illumina Nextera adaptor sequences
-TRU_ADP1=AGATCGGAAGAGCACACGTCTGAACTCCAGTCA # Illumina TruSeq and NEB Nebnext adaptor sequences
-TRU_ADP2=AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT # Illumina TruSeq and NEB Nebnext adaptor sequences
 
 # Illumina data
 for DATA_PREFIX in $ILM_ALL
@@ -118,24 +105,16 @@ do
 done
 fi
 
-# Concatenate assembly data
-if [ ! -f "trimmed_data/all_ilmtrim.fq" ]; then
-printf "\nConcatenating Illumina data for assembly [$ILM_ASMB]\n\n"
-for DATA_PREFIX in $ILM_ASMB
-do
-  cat trimmed_data/${DATA_PREFIX}_ilmtrim.fq >> trimmed_data/all_ilmtrim.fq
-done
-fi
-
 ### Metagenome assembly --------------------------------------------------------
 if [ ! -d "metagenome_assembly" ]; then
 printf "\n# Illumina metagenome assembly ----------------------------------\n\n"
-$MEGAHIT --12 trimmed_data/all_ilmtrim.fq --k-list 43,71,99,127 -o metagenome_assembly 
+mkdir -p metagenome_assembly
+cat $(echo "$ILM_ASMB" | sed -e "s/^/trimmed_data\\//" -e "s/$/*/" ) > metagenome_assembly/ilm_all.fq
+$MEGAHIT --12 metagenome_assembly/ilm_all.fq --k-list 43,71,99,127 \
+-t $THREADS -m 0.7 -o metagenome_assembly/workspace 
 awk '!/^>/ { next } { getline seq } length(seq) >= 1000 { print ">" ++i "\n" seq }' \
-metagenome_assembly/final.contigs.fa > metagenome_assembly/ilm_assembly.fa
+metagenome_assembly/workspace/final.contigs.fa > metagenome_assembly/short_assembly.fa
 fi
-#$SPADES --12 trimmed_data/all_ilmtrim.fq -t $THREADS -o metagenome_assembly \
-#-k 33,77,127 --meta --only-assembler 
 
 ### Metagenome mapping ---------------------------------------------------------
 if [ ! -d "metagenome_mapping" ]; then
@@ -146,26 +125,37 @@ mkdir -p metagenome_mapping
 for DATA_PREFIX in $ILM_COV
 do
   printf "\nIllumina read mapping of [$DATA_PREFIX]\n\n"
-  $MINIMAP2 -ax sr -t $THREADS metagenome_assembly/ilm_assembly.fa \
+  $MINIMAP2 -ax sr -t $THREADS metagenome_assembly/short_assembly.fa \
   trimmed_data/${DATA_PREFIX}_ilmtrim.fq | \
   $SAMTOOLS view -@ $THREADS -Sb -F 0x104 - |\
   $SAMTOOLS sort -@ $THREADS - > metagenome_mapping/${DATA_PREFIX}_cov.bam
 done
 
-# Read coverage and stdev
-for BAM in metagenome_mapping/*_cov.bam
+# Read coverage in windows
+find  metagenome_mapping/ -name '*_cov.bam' |\
+$PARALLEL --progress -j$THREADS "$MMLONG_READCOVERAGE -d {} -m bam -o metagenome_mapping -t 1 -w 500"
+
+# Illumina connections for assembly datasets
+for DATA_PREFIX in $ILM_ASMB
 do
-  printf "\nRead coverage estimation of [$BAM]\n\n"
-  $MMLONG_READCOVERAGE -d $BAM -m bam -o metagenome_mapping -t $THREADS
+  printf "\nExtract putative inter contig Illumina links from [$DATA_PREFIX]\n\n"
+  $MMLONG_LINKS -a metagenome_assembly/short_assembly.fa \
+  -d metagenome_mapping/${DATA_PREFIX}_cov.bam -m bam -e 3000000 -o metagenome_mapping -t $THREADS
 done
 
-# Illumina connections
+# Illumina connections for coverage datasets
 for DATA_PREFIX in $ILM_COV
 do
   printf "\nExtract putative inter contig Illumina links from [$DATA_PREFIX]\n\n"
-  $MMLONG_LINKS -a metagenome_assembly/ilm_assembly.fa \
-  -d metagenome_mapping/${DATA_PREFIX}_cov.bam -m bam -e 3000000 -o metagenome_mapping -t $THREADS
+  $MMLONG_LINKS -a metagenome_assembly/short_assembly.fa \
+  -d metagenome_mapping/${DATA_PREFIX}_cov.bam -m bam -e 3000000 -o metagenome_mapping/ilm_all_links -t $THREADS -n 1
 done
+
+echo "scaffold1,scaffold2,position1,position2,connections" > metagenome_mapping/ilm_all_link.csv
+cat metagenome_mapping/ilm_all_links/*_link.csv |\
+sed '/scaffold1,scaffold2,position1,position2,connections/d' |\
+awk -F"," '{a[$1","$2","$3","$4] += $5} END {for (i in a) if (a[i] >= 2) print i","a[i]}' \
+>> metagenome_mapping/ilm_all_link.csv
 fi
 
 ### Automatic binning ---------------------------------------------------------
@@ -174,7 +164,7 @@ printf "\n# Automatic binning with metabat2 ------------------------------\n\n"
 mkdir -p metagenome_autobinning
 mkdir -p metagenome_autobinning/bins
 $METABAT2_COV --outputDepth metagenome_autobinning/depth.txt metagenome_mapping/*.bam
-$METABAT2 -i metagenome_assembly/ilm_assembly.fa -a metagenome_autobinning/depth.txt \
+$METABAT2 -i metagenome_assembly/short_assembly.fa -a metagenome_autobinning/depth.txt \
 -o metagenome_autobinning/bins/bin
 echo "scaffold,auto_bin" > metagenome_autobinning/auto_bin.csv
 for ABIN in metagenome_autobinning/bins/*.fa; do
@@ -191,14 +181,11 @@ if [ ! -d "metagenome_annotation" ]; then
 printf "\n# Taxonomic classification, detection essential genes and 16S rRNA\n\n"
 mkdir -p metagenome_annotation
 
-# Prodigal gene prediction
-printf "\nProdigal gene prediction and translation\n\n"
-cat metagenome_assembly/ilm_assembly.fa | $PARALLEL --progress -j $THREADS \
---recstart '>' --pipe "cat > metagenome_annotation/{#}.tmp; $PRODIGAL \
--a metagenome_annotation/{#}_orfs.tmp -i metagenome_annotation/{#}.tmp \
--m -o /dev/null -p meta -q"
-cat metagenome_annotation/*_orfs.tmp > metagenome_annotation/orfs.faa
-rm metagenome_annotation/*.tmp
+# FragGeneScan gene prediction
+printf "\nFragGeneScan gene prediction and translation\n\n"
+$FRAGGENESCAN -genome=metagenome_assembly/short_assembly.fa \
+-out=metagenome_annotation/orfs -complete=1 -train=illumina_10 \
+-thread=$THREADS
 
 # Essential genes
 printf "\nDetection of essential genes using HMM\n\n"
@@ -228,16 +215,16 @@ sort -n -t, -k1,1 >> metagenome_annotation/tax.csv
 
 # 16S rRNA gene extraction
 printf "\nDetect 16S rRNA genes with Barrnap and classify with Mothur \n\n"
-$BARRNAP metagenome_assembly/ilm_assembly.fa --reject 0.3 --threads $THREADS \
+$BARRNAP metagenome_assembly/short_assembly.fa --reject 0.3 --threads $THREADS \
 --kingdom bac --quiet > metagenome_annotation/rRNA_search.txt
 grep "16S_rRNA" metagenome_annotation/rRNA_search.txt | cut -f1,4,5 | \
 sed -e '/^#/d' -e 's/Name=//' | sort -u > metagenome_annotation/ssu_gene.txt
 
-$SAMTOOLS faidx metagenome_assembly/ilm_assembly.fa
+$SAMTOOLS faidx metagenome_assembly/short_assembly.fa
 for GENE in "$(cat metagenome_annotation/ssu_gene.txt)"
 do
  REGION=`echo "$GENE" | sed -e 's/\t/:/' -e 's/\t/-/'`
- $SAMTOOLS faidx metagenome_assembly/ilm_assembly.fa $REGION \
+ $SAMTOOLS faidx metagenome_assembly/short_assembly.fa $REGION \
  >> metagenome_annotation/ssu_gene.fa
 done
 
@@ -263,7 +250,7 @@ printf "\n#Prepare binning folder -----------------------------------------\n\n"
 mkdir -p binning
 mkdir -p binning/data
 
-cp metagenome_assembly/ilm_assembly.fa binning/data/
+cp metagenome_assembly/short_assembly.fa binning/data/
 cp metagenome_mapping/*_cov.csv binning/data/
 cp metagenome_mapping/*_link.csv binning/data/
 cp metagenome_annotation/tax.csv binning/data/
@@ -291,35 +278,4 @@ exit 0
 ################################################################################
 ### Testing --------------------------------------------------------------------
 ################################################################################
-NP_ASMB=`cat np_asmb.txt`;
-NP_COV=`cat np_cov.txt`;
-ILM_COV=`cat ilm_cov.txt`;
-ILM_ADP1=CTGTCTCTTATACACATCTGACGCTGCCGACGA
-ILM_ADP2=CTGTCTCTTATACACATCTCCGAGCCCACGAGAC
-FILTLONG=/space/sharedbin/bin/filtlong;
-CUTADAPT=/space/users/smk/bin/cutadapt;
-PORECHOP=/space/users/smk/bin/porechop; 
-RACON=/space/sharedbin/bin/racon;
-MINIASM=/space/sharedbin/bin/miniasm;
-MINIMAP2=/space/users/smk/Software/minimap2-2.5/minimap2-2.5_x64-linux/minimap2;
-SAMTOOLS=/space/users/smk/Software/SAMtools/bin/samtools;
-PARALLEL=/usr/bin/parallel;
-PRODIGAL=/space/sharedbin/bin/prodigal;
-HMMSEARCH=/usr/bin/hmmsearch;
-ESSENTIAL=/space/users/smk/Software/databases/essential/essential.hmm;
-KAIJU=/space/users/smk/Software/kaiju/bin;
-KAIJU_DB=/space/users/smk/Software/kaiju/database;
-BARRNAP=/space/users/smk/Software/barrnap-0.8/bin/barrnap;
-MOTHUR=/space/sharedbin/bin/mothur;
-MOTHUR_DB=/space/users/smk/Software/databases/mothur/silva.seed_v132.align;
-MOTHUR_TAX=/space/users/smk/Software/databases/mothur/silva.seed_v132.tax;
-RSTUDIO=/usr/bin/rstudio;
-NP_ALL=`printf "$NP_COV""\n""$NP_ASMB""\n" | sort |uniq`;
-NP_COV_NAME=`echo "$NP_COV" | sed 's/\..*$//g'`;
-NP_ASMB_NAME=`echo "$NP_ASMB" | sed 's/\..*$//g'`;
-ILM_COV_NAME=`echo "$ILM_COV" | sed 's/[12]\..*$//g' | sort | uniq`;
-THREADS=40;
-NP_MINLENGTH=8000;
-DATA_DIR=../data;
-
 

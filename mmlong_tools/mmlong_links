@@ -11,7 +11,7 @@ VERSION_LINKS=0.1.0
 ### Description ----------------------------------------------------------------
 
 USAGE="$(basename "$0") [-h] [-a file -d file -m string -l value -e value -o folder
-   -t value -c value -n value] 
+   -t value -c value -w value -n value -p string -f string -q value] 
 -- mmlong links v. $VERSION_LINKS: Detect putative links between contigs in assembly
    based on Illumina PE reads, Nanopore reads or mapped PE reads in bam format.
 
@@ -25,7 +25,15 @@ where:
     -o  output folder.
     -t  Number of threads. Default is 40.
     -c  Contig minimum length. Default is 4000 bp.
-    -n  Minimum number of links to count as true link. Default: 2.
+    -w  Window size for binning links. Default is 2000 bp.
+    -n  Minimum number of links in a window to count as true link. Default: 2.
+    -p  Output prefix. Default is input file prefix.
+    -f  Flag forwarded to Samtools -F for mapping filtering.
+        Default is \"0x904\", which removes unmapped, secondary alignments and
+        supplementary.
+    -q  Quality value forwarded to Samtools -q for mapping filtering.
+        Default is \"0\", which doesn't remove alignments based on quality.
+        -q > 0 removes ambiguous mappings.
 
 Examples:
 
@@ -36,7 +44,7 @@ mmlong links -a test_assembly.fa -d test_reads.fq -m ilm -e 1000 -o out -t 40
 ### Terminal Arguments ---------------------------------------------------------
 
 # Import user arguments
-while getopts ':hza:d:m:l:e:o:t:c:n:' OPTION; do
+while getopts ':hza:d:m:l:e:o:t:c:w:n:p:f:q:' OPTION; do
   case $OPTION in
     h) echo "$USAGE"; exit 1;;
     a) ASMB_FILE=$OPTARG;;
@@ -47,7 +55,11 @@ while getopts ':hza:d:m:l:e:o:t:c:n:' OPTION; do
     o) OUT_DIR=$OPTARG;;
     t) THREADS=$OPTARG;;
     c) CONTIG_MINLEN=$OPTARG;;
+    w) WIN_LENGTH=$OPTARG;;
     n) LINK_MIN=$OPTARG;;
+    p) PREFIX=$OPTARG;;
+    f) FFLAG=$OPTARG;;
+    q) QFLAG=$OPTARG;;
     :) printf 'missing argument for -$OPTARG\n' >&2; exit 1;;
     \?) printf 'invalid option for -$OPTARG\n' >&2; exit 1;;
   esac
@@ -83,6 +95,10 @@ if [ -z ${OUT_DIR+x} ]; then OUT_DIR=out; fi;
 if [ -z ${THREADS+x} ]; then THREADS=40; fi;
 if [ -z ${CONTIG_MINLEN+x} ]; then CONTIG_MINLEN=4000; fi;
 if [ -z ${LINK_MIN+x} ]; then LINK_MIN=2; fi;
+if [ -z ${PREFIX+x} ]; then PREFIX=${DATA_FILE}; fi;
+if [ -z ${FFLAG+x} ]; then FFLAG="0x904"; fi;
+if [ -z ${QFLAG+x} ]; then QFLAG=0; fi;
+if [ -z ${WIN_LENGTH+x} ]; then WIN_LENGTH=2000; fi;
 
 
 ### Path to dependencies
@@ -108,7 +124,10 @@ function logging {
   Contig end length:	$CONTIG_END
   Output directory:	$OUT_DIR
   CPU threads:		$THREADS
-  Minimum links:        $LINK_MIN" >> $OUT_DIR/$LOG_NAME
+  Minimum links:        $LINK_MIN
+  Samtools -F flag:	$FFLAG
+  Samtools -q flag:	$QFLAG
+  Window length:        $WIN_LENGTH" >> $OUT_DIR/$LOG_NAME
 }
 
 ################################################################################
@@ -118,14 +137,15 @@ function logging {
 
 function mmlong_nanopore_ppe {
   # Arguments
-  READ=$1
-  READN=$2
-  OUT=$3
+  local READ=$1
+  local READN=$2
+  local OUT=$3
+  local DATA_NAME=$4
 
   # Format names
-  READ_NAME=${READ##*/}
-  READ_NAME=${READ_NAME%.*}
-  READ_NAME=${READ_NAME%_nptrim}
+  local READ_NAME=${DATA_NAME##*/}
+  local READ_NAME=${READ_NAME%.*}
+  local READ_NAME=${READ_NAME%_nptrim}
   
   # Prepare pseudo matepairs from nanopore data
   awk -v read_len="$READN" '
@@ -143,47 +163,52 @@ function mmlong_nanopore_ppe {
 
 function mmlong_links_minimap2 {
   # Arguments
-  ASMB=$1
-  MP=$2
-  OUT=$3
-  NT=$4
-  M=$5
+  local ASMB=$1
+  local MP=$2
+  local OUT=$3
+  local NT=$4
+  local M=$5
+  local DATA_NAME=$6
+  local FFLAG=$7
+  local QFLAG=$8
 
   if [ "$M" = "ilm" ]; then MMM="sr"; fi;
   if [ "$M" = "np" ]; then MMM="map-ont"; fi;
 
   # Format names
-  MP_NAME=${MP##*/}
-  MP_NAME=${MP_NAME%.*}
-  MP_NAME=${MP_NAME%_nptrim}
-  MP_NAME=${MP_NAME%_ilmtrim}
+  local MP_NAME=${DATA_NAME##*/}
+  local MP_NAME=${MP_NAME%.*}
+  local MP_NAME=${MP_NAME%_nptrim}
+  local MP_NAME=${MP_NAME%_ilmtrim}
   
   # Map pseudo matepairs to assembly  
   $MINIMAP2 -t $NT -ax $MMM $ASMB $MP |\
-  $SAMTOOLS view -@ $NT -b -F 0x904 - |\
+  $SAMTOOLS view -@ $NT -b -q $QFLAG -F $FFLAG - |\
   $SAMTOOLS sort -@ $NT - > $OUT/${MP_NAME}.bam
 }
 
 function mmlong_links_detect {
   # Arguments 
-  ASMB=$1
-  BAM=$2
-  CN=$3
-  OUT=$4
-  NT=$5
-  CML=$6
-  LM=$7
+  local ASMB=$1
+  local BAM=$2
+  local CN=$3
+  local OUT=$4
+  local NT=$5
+  local CML=$6
+  local LM=$7
+  local DN=$8
+  local WL=$9
 
   # Format names
-  BAM_NAME=${BAM##*/}
-  BAM_NAME=${BAM_NAME%.*}
-  BAM_NAME=${BAM_NAME%_cov}
-  BAM_NAME=${BAM_NAME%_nmp}
+  local BAM_NAME=${DN##*/}
+  local BAM_NAME=${BAM_NAME%.*}
+  local BAM_NAME=${BAM_NAME%_cov}
+  local BAM_NAME=${BAM_NAME%_nmp}
 
   # Define terminal regions
-  ASMB_ONELINE=`awk '/^>/ {printf("\n%s\n",$1);next; } { printf("%s",$0);}\
+  local ASMB_ONELINE=`awk '/^>/ {printf("\n%s\n",$1);next; } { printf("%s",$0);}\
                   END {printf("\n");}' $ASMB | tail -n +2`
-  REGION=`awk -v end_len="$CN" -v seq_minlen="$CML" '
+  local REGION=`awk -v end_len="$CN" -v seq_minlen="$CML" '
                  NR%2==1{name=substr($1,2)}
                  NR%2==0{seq_len=length($0);
                          start1=1;
@@ -196,27 +221,30 @@ function mmlong_links_detect {
                            print name":"start1"-"end2
                          }
   ' <(echo "$ASMB_ONELINE")`
-  unset ASMB_ONELINE
+  unset ASMB_ONELINE #Clear memory
 
   # Extract terminal mappings
   $SAMTOOLS index $BAM
   export SAMTOOLS BAM OUT
   mkdir $OUT/tmp
   echo "$REGION" |\
-  $PARALLEL -j $NT $'$SAMTOOLS view -@ 1 $BAM {} | grep -v "^@" | cut -f1,3,4,5 | sort -k1,2 | sed '\''s/_[1-9]\t/\t/'\'' > $OUT/tmp/{#}.tmp'
+  $PARALLEL -j $NT $'$SAMTOOLS view -@ 1 $BAM {} | grep -v "^@" |\
+    cut -f1,3,4,5 | sort -k1,2 | sed '\''s/_[1-9]\t/\t/'\'' > $OUT/tmp/{#}.tmp'
   cat $OUT/tmp/*.tmp > $OUT/$BAM_NAME.mapmeta
   rm -rf $OUT/tmp
 
   # Detect contig links
   echo "scaffold1,scaffold2,position1,position2,connections" > $OUT/${BAM_NAME}_link.csv
   cat $OUT/$BAM_NAME.mapmeta |\
+  # Detect mapped read pairs and mapping scaffold and position 
   awk '{a[$1]=a[$1] (a[$1]==""?"":OFS) $2;
        b[$1]++;
        c[$1]=c[$1] (c[$1]==""?"":OFS) $3} 
        END{for(i in a) if (b[i]==2) print i, a[i], c[i]}
       ' - |\
-  awk '{ $4=int($4/2000) * 2000;
-       $5=int($5/2000) * 2000}
+  # Bin positions in 2000 bp windows
+  awk -v wl="$WL" '{ $4=int($4/wl) * wl;
+       $5=int($5/wl) * wl}
        ($2 < $3) {print $2,$3,$4,$5};
        ($2 > $3) {print $3,$2,$5,$4}
       ' - |\
@@ -225,7 +253,7 @@ function mmlong_links_detect {
 }
 
 # Format read data name
-DATA_NAME=${DATA_FILE##*/}
+DATA_NAME=${PREFIX##*/}
 DATA_NAME=${DATA_NAME%.*}
 DATA_NAME=${DATA_NAME%_nptrim}
 DATA_NAME=${DATA_NAME%_ilmtrim}
@@ -234,9 +262,12 @@ DATA_NAME=${DATA_NAME%_ilmtrim}
 if [ "$MODE" = "np" ]; then
   mkdir -p $OUT_DIR
   logging "$*"
-  mmlong_nanopore_ppe $DATA_FILE $NP_LENGTH $OUT_DIR
-  mmlong_links_minimap2 $ASMB_FILE $OUT_DIR/${DATA_NAME}_nmp.fq $OUT_DIR $THREADS $MODE
-  mmlong_links_detect $ASMB_FILE $OUT_DIR/${DATA_NAME}_nmp.bam $CONTIG_END $OUT_DIR $THREADS $CONTIG_MINLEN $LINK_MIN
+  mmlong_nanopore_ppe $DATA_FILE $NP_LENGTH $OUT_DIR $DATA_NAME
+  mmlong_links_minimap2 $ASMB_FILE $OUT_DIR/${DATA_NAME}_nmp.fq\
+    $OUT_DIR $THREADS $MODE ${DATA_NAME}_nmp $FFLAG $QFLAG
+  mmlong_links_detect $ASMB_FILE $OUT_DIR/${DATA_NAME}_nmp.bam\
+    $CONTIG_END $OUT_DIR $THREADS $CONTIG_MINLEN $LINK_MIN\
+    ${DATA_NAME}_nmp $WIN_LENGTH
   rm $OUT_DIR/*_nmp.fq $OUT_DIR/*.mapmeta
 fi
 
@@ -245,8 +276,11 @@ fi
 if [ "$MODE" = "ilm" ]; then
   mkdir -p $OUT_DIR
   logging "$*"
-  mmlong_links_minimap2 $ASMB_FILE $DATA_FILE $OUT_DIR $THREADS $MODE
-  mmlong_links_detect $ASMB_FILE $OUT_DIR/${DATA_NAME}.bam $CONTIG_END $OUT_DIR $THREADS $CONTIG_MINLEN $LINK_MIN
+  mmlong_links_minimap2 $ASMB_FILE $DATA_FILE $OUT_DIR $THREADS\
+    $MODE $DATA_NAME $FFLAG $QFLAG
+  mmlong_links_detect $ASMB_FILE $OUT_DIR/${DATA_NAME}.bam\
+    $CONTIG_END $OUT_DIR $THREADS $CONTIG_MINLEN $LINK_MIN\
+    $DATA_NAME $WIN_LENGTH
   rm $OUT_DIR/*.mapmeta
 fi
 
@@ -254,7 +288,8 @@ fi
 if [ "$MODE" = "bam" ]; then
   mkdir -p $OUT_DIR
   logging "$*"
-  mmlong_links_detect $ASMB_FILE $DATA_FILE $CONTIG_END $OUT_DIR $THREADS $CONTIG_MINLEN $LINK_MIN
+  mmlong_links_detect $ASMB_FILE $DATA_FILE $CONTIG_END $OUT_DIR\
+  $THREADS $CONTIG_MINLEN $LINK_MIN $DATA_NAME $WIN_LENGTH
   rm $OUT_DIR/*.mapmeta
 fi
 

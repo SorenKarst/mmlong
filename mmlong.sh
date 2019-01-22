@@ -21,17 +21,20 @@ where:
     ...  Commands for tool.
 
 Workflows:
-* hybrid-metaflow: Metagenomic long read assembly and binning from
-                   using short and long read data.
-* short-metaflow:  Metagenomic assembly and binning from short
-                   read data.
-* bin-reassembly:  Reassembly of metagenome bins using unicycler.
+* hybrid-metaflow:   Metagenomic long read assembly and binning from
+                     using short and long read data.
+* short-metaflow:    Metagenomic assembly and binning from short
+                     read data.
+* bin-reassembly:    Reassembly of metagenome bins using unicycler.
 
 Tools:
-* miniasm-racon:   Long read assembly with miniasm and racon polishing.
-* readcoverage:    Read mapping and read coverage estimation.
-* links:           Read mapping and detection of putative links between
-                   scaffolds in an assembly.
+* miniasm-racon:     Long read assembly with miniasm and racon polishing.
+* readcoverage:      Read mapping and read coverage estimation.
+* links:             Read mapping and detection of putative links between
+                     scaffolds in an assembly.
+* basic-annotation:  Basic annotation of genomic data includes calling
+                     and classification of essential genes and 16S rRNA
+                     gene.
 
 For help with a specific tool type: mmlong <name> -h
 "
