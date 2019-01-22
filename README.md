@@ -23,6 +23,11 @@ A collection of scripts for metagenome assembly using long reads.
 3. If unsure of the paths try to type `which <function>` in the terminal. I.e. `which racon`.
 
 # Running mmlong functions
+
+## Accessing master script and tools
 1. `mmlong -h` gives an overview of available tools.
 2. `mmlong <tool name> -h` gives the help text for the specific tool. i.e. `mmlong hybrid-metalflow`
+
+## Example commands
+mmlong hybrid-metaflow -d data -n np_asmb.txt -m np_cov.txt -s ilm_asmb.txt -i ilm_cov.txt -t 10 -l 4000 -k
 
