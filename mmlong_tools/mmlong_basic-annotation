@@ -1,0 +1,209 @@
+#!/bin/bash
+# mmlong basic-annotation
+# By Søren Karst
+# Version
+ANNOTATION_VERSION=0.1
+
+################################################################################
+### Preparation ----------------------------------------------------------------
+################################################################################
+
+### Description ----------------------------------------------------------------
+
+USAGE="$(basename "$0") [-h] [-a file -o dir -p string -t value ] 
+-- mmlong metagenome annotation v. ${ANNOTATION_VERSION}:
+   Basic annotation of genomic data includes calling and classification
+   of essential genes and SSU rRNA gene. FragGeneScan is used for gene
+   calling, essential genes are detected by using hmmsearch, Kaiju is
+   used for classification, barrnap is used to detect SSU rRNA genes,
+   and mothur is used to classify SSU rRNA genes.
+
+where:
+    -h  Show this help text.
+    -a  (Meta)genomic assembly file in fasta format.
+    -o  Output directory.
+    -p  Prefix string for output files. Default is none.
+    -t  Number of threads to use.
+
+
+Example command:
+mmlong basic-annotation -a metagenome_assembly.fa -o out -p meta -t 10 
+"
+### Terminal Arguments ---------------------------------------------------------
+
+
+# Import user arguments
+while getopts ':hza:o:p:t:' OPTION; do
+  case $OPTION in
+    h) echo "$USAGE"; exit 1;;
+    a) ASMB=$OPTARG;;
+    o) OUTDIR=$OPTARG;;
+    p) PREFIX=${OPTARG}_;;
+    t) THREADS=$OPTARG;;
+    :) printf "missing argument for -$OPTARG\n" >&2; exit 1;;
+    \?) printf "invalid option for -$OPTARG\n" >&2; exit 1;;
+  esac
+done
+
+# Check missing arguments
+MISSING="is missing but required. Exiting."
+if [ -z ${ASMB+x} ]; then echo "-a $MISSING"; echo "$USAGE"; exit 1; fi; 
+if [ -z ${OUTDIR+x} ]; then echo "-o $MISSING"; echo "$USAGE"; exit 1; fi; 
+if [ -z ${THREADS+x} ]; then echo "-t $MISSING"; echo "$USAGE"; exit 1; fi; 
+
+### Path to dependencies
+. $MMLONG_DIR/mmlong_tools/dependencies.sh
+
+### Create output directory
+mkdir -p $OUTDIR
+
+################################################################################
+### Log settings ---------------------------------------------------------------
+################################################################################
+
+  LOG_NAME="$OUTDIR/mmlong_basic-annotation_log_$(date +%s).txt"
+  exec > >(tee -a $LOG_NAME)
+  exec 2>&1
+  echo "mmlong basic-annotation log" >> $LOG_NAME
+  echo "Script start: $(date)" >> $LOG_NAME
+  echo "Settings:
+  Script version: 	$ANNOTATION_VERSION
+  Script call: 		$0 $*
+  Assembly file:	$ASMB
+  Output directory:	$OUTDIR
+  Output prefix:	$PREFIX
+  Threads:		$THREADS" >> $LOG_NAME
+
+################################################################################
+### Workflow -------------------------------------------------------------------
+################################################################################
+
+### Metagenome annotation -----------------------------------------------------
+printf "\n# Taxonomic classification, detection essential genes and 16S rRNA\n\n"
+
+# FragGeneScan gene prediction
+printf "\nFragGeneScan gene prediction and translation\n\n"
+$FRAGGENESCAN -genome=$ASMB \
+  -out=$OUTDIR/${PREFIX}orfs -complete=1 -train=illumina_10 \
+  -thread=$THREADS
+
+# Essential genes
+printf "\nDetection of essential genes using HMM\n\n"
+$HMMSEARCH --tblout $OUTDIR/${PREFIX}orfs_hmm.txt --cut_tc --notextw \
+  --cpu $THREADS $ESSENTIAL $OUTDIR/${PREFIX}orfs.faa > /dev/null
+
+echo "scaffold,hmm.id" > $OUTDIR/${PREFIX}essential.csv
+tail -n+4  $OUTDIR/${PREFIX}orfs_hmm.txt |\
+  sed 's/ * / /g' | cut -f1,4 -d " " |\
+  sed -e 's/_/ /' -e '/^#/ d' | tr " " "," |\
+  cut -f1,3 -d"," >> $OUTDIR/${PREFIX}essential.csv
+
+# Kaiju protein taxonomic classification
+printf "\nTaxonomic classification of contigs using Kaiju\n\n"
+$KAIJU/kaiju -p -z $THREADS -t $KAIJU_DB/nodes.dmp -f $KAIJU_DB/kaiju_db.fmi \
+  -i $OUTDIR/${PREFIX}orfs.faa -o $OUTDIR/${PREFIX}kaiju.out
+  $KAIJU/addTaxonNames -u -r phylum -t $KAIJU_DB/nodes.dmp -n $KAIJU_DB/names.dmp \
+  -i $OUTDIR/${PREFIX}kaiju.out -o $OUTDIR/${PREFIX}kaiju_names.out
+
+# Majority vote contig classification
+echo "scaffold,phylum" > $OUTDIR/${PREFIX}tax.csv
+cat $OUTDIR/${PREFIX}kaiju_names.out | \
+  sed -e 's/_/\t/' -e '/NA;/d' -e 's/; //'  | \
+  cut -f2,5 | \
+  awk -F "\t" '{a[$1","$2]++} END{OFS = ","; for (i in a) print i, a[i]}' - | \
+  awk -F "," '{if (c[$1]<$3){a[$1]=$1; b[$1]=$2; c[$1]=$3}; d[$1]+=$3} \
+  END{OFS = ","; for (i in a){if (c[i] >= 2 && c[i]/d[i] > 0.51) print a[i], b[i] }}' - |\
+  sort -n -t, -k1,1 >> $OUTDIR/${PREFIX}tax.csv
+
+# SSU rRNA gene extraction
+printf "\nDetect 16S rRNA genes with Barrnap and classify with Mothur \n\n"
+$BARRNAP $ASMB --reject 0.3 --threads $THREADS \
+  --kingdom bac --quiet > $OUTDIR/${PREFIX}ssu_gene.gff3
+$BARRNAP $ASMB --reject 0.3 --threads $THREADS \
+  --kingdom arc --quiet | tail -n +2 >> $OUTDIR/${PREFIX}ssu_gene.gff3
+$BARRNAP $ASMB --reject 0.3 --threads $THREADS \
+  --kingdom euk --quiet | tail -n +2 >> $OUTDIR/${PREFIX}ssu_gene.gff3
+
+# Pick best SSU annotation from arc, bac and euk results
+awk '$9 ~ /1[2,6,8]S_rRNA/{
+  # Store all genecalls in array
+  I[$1]++
+  S[$1][I[$1]] = $4
+  E[$1][I[$1]] = $5
+  EV[$1][I[$1]] = $6
+  L[$1][I[$1]] = $5 - $4
+  } END {
+  # Loop over contigs
+    for (C in L){
+    # Loop over genecalls sorted by length
+      PROCINFO["sorted_in"] = "@val_num_desc"
+      for (GC in L[C]){
+        if (VI[C] == ""){
+          VI[C] = 1
+          START[C" "1] = S[C][GC]
+          FINISH[C" "1] = E[C][GC]
+          EVALUE[C" "1] = EV[C][GC]
+          LENGTH[C" "1] = L[C][GC]
+        } else {
+        # Loop over validated list
+          OVERLAP = "false"
+          for (i = 1; i <= VI[C]; i++){
+            # Scan for overlap - min overlap of 200 bp
+            if (START[C" "i] + 200 <= E[C][GC] && S[C][GC] + 200 <= FINISH[C" "i]){
+              OVERLAP = "true"
+              # Replace if better or ignore
+              if (LENGTH[C" "i] * 0.8 < L[C][GC] && EVALUE[C" "i] * 0.8 > EV[C][GC]){
+                START[C" "i] = S[C][GC]
+                FINISH[C" "i] = E[C][GC]
+                EVALUE[C" "i] = EV[C][GC]
+                LENGTH[C" "i] = L[C][GC]                       
+              }                
+            }
+          }
+          # If no match found add to list
+          if ( OVERLAP != "true" ){
+            VI[C]++
+            START[C" "VI[C]] = S[C][GC]
+            FINISH[C" "VI[C]] = E[C][GC]
+            EVALUE[C" "VI[C]] = EV[C][GC]
+            LENGTH[C" "VI[C]] = L[C][GC]
+          }
+        }
+      }
+    }
+    PROCINFO["sorted_in"] = "@val_num_asc"
+    for (i in START){
+      split(i, SEQN, " ")
+      print SEQN[1]":"START[i]"-"FINISH[i]
+    }
+  }' $OUTDIR/${PREFIX}ssu_gene.gff3\
+  > $OUTDIR/${PREFIX}ssu_gene.regions
+
+# Extract SSU sequences
+$SAMTOOLS faidx $ASMB -r $OUTDIR/${PREFIX}ssu_gene.regions\
+  -n100000 > $OUTDIR/${PREFIX}ssu_gene.fa
+
+# Classify SSU with Mothur
+MOTHUR_IN=$(echo "$OUTDIR/${PREFIX}ssu_gene.fa" | sed 's/-/\\-/g') #Mothur needs '-' to be escaped.
+$MOTHUR "#classify.seqs(fasta=$MOTHUR_IN,
+reference=$MOTHUR_DB, taxonomy=$MOTHUR_TAX,
+processors=$THREADS, outputdir=$OUTDIR)"
+
+echo "scaffold,ssu" > $OUTDIR/${PREFIX}ssu_tax.csv
+cat $OUTDIR/${PREFIX}ssu_gene.seed_v132.wang.taxonomy | \
+  sed 's/_[0-9-]*\t/,/' >> $OUTDIR/${PREFIX}ssu_tax.csv
+
+echo "scaffold,ssu_count" > $OUTDIR/${PREFIX}ssu_count.csv
+cat $OUTDIR/${PREFIX}ssu_tax.csv | tail -n +2 | cut -d"," -f1 | \
+sort | uniq -c | sed -e "s/^ *//" | awk '{ print $2 "," $1}' | \
+sort -t, -k1,1 -n >> $OUTDIR/${PREFIX}ssu_count.csv
+
+################################################################################
+### Exit -----------------------------------------------------------------------
+################################################################################
+printf "\n##### Processing done $(date) #####\n\n"
+exit 0
+
+################################################################################
+### Testing --------------------------------------------------------------------
+################################################################################

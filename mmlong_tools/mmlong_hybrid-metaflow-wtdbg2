@@ -1,0 +1,302 @@
+#!/bin/bash
+# mmlong hybrid metagenome workflow data generation
+# By Rasmus Kirkegaard and Søren Karst
+# Version
+HYBRID_METAFLOW_VERSION=1.1.9
+
+################################################################################
+### Preparation ----------------------------------------------------------------
+################################################################################
+
+### Description ----------------------------------------------------------------
+
+USAGE="$(basename "$0") [-h] [-d path -n file -m file -s file -i file -t value -l value -k] 
+-- mmlong hybrid metagenome data generation workflow v. ${HYBRID_METAFLOW_VERSION}: Read filtering/trimming,
+   metagenome assembly, read coverage estimation, taxonomic classification and 
+   detection of SSU rRNA.
+
+where:
+    -h  Show this help text.
+    -d  Sequencing data folder.
+    -n  List of prefixes for Nanopore data files to be used for assembly.
+        The file names follow the format: \"prefix.fq\".
+    -m  List of prefixes for Nanopore data files to be used for
+        read coverage estimates. The file names follow the format: \"prefix.fq\".
+    -s  List of prefixes for Illumina PE data files to be used for re-assembly in subsequent workflows.
+        The file names follow the format: \"prefix_R1.fq\" and \"prefix_R2.fq\".
+    -i  List of prefixes for Illumina PE data files to be used for read coverage estimates.
+        The file names follow the format: \"prefix_R1.fq\" and \"prefix_R2.fq\".
+    -t  Number of threads to use.
+    -l  Minimum nanopore reads length.
+    -k  Keep temporary files.
+
+Example command:
+mmlong hybrid-metaflow -d data -n np_asmb.txt -m np_cov.txt
+-s ilm_asmb.txt -i ilm_cov.txt -t 40 -l 8000
+"
+
+### Customizable Arguments -----------------------------------------------------
+
+# Adaptors
+NEX_ADP1=CTGTCTCTTATACACATCT # Illumina Nextera adaptor sequences
+NEX_ADP2=CTGTCTCTTATACACATCT # Illumina Nextera adaptor sequences
+TRU_ADP1=AGATCGGAAGAGCACACGTCTGAACTCCAGTCA # Illumina TruSeq and NEB Nebnext adaptor sequences
+TRU_ADP2=AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT # Illumina TruSeq and NEB Nebnext adaptor sequences
+
+### Terminal Arguments ---------------------------------------------------------
+
+
+# Import user arguments
+while getopts ':hzd:n:m:s:i:t:l:k' OPTION; do
+  case $OPTION in
+    h) echo "$USAGE"; exit 1;;
+    d) DATA_DIR=$OPTARG;;
+    n) NP_ASMB=$OPTARG;;
+    m) NP_COV=`cat $OPTARG`;;
+    s) ILM_ASMB=`cat $OPTARG`;;
+    i) ILM_COV=`cat $OPTARG`;;
+    t) THREADS=$OPTARG;;
+    l) NP_MINLENGTH=$OPTARG;;
+    k) KEEP="YES";;
+    :) printf "missing argument for -$OPTARG\n" >&2; exit 1;;
+    \?) printf "invalid option for -$OPTARG\n" >&2; exit 1;;
+  esac
+done
+
+# Check missing arguments
+MISSING="is missing but required. Exiting."
+if [ -z ${DATA_DIR+x} ]; then echo "-d $MISSING"; echo "$USAGE"; exit 1; fi; 
+if [ -z ${NP_ASMB+x} ]; then echo "-n $MISSING"; echo "$USAGE"; exit 1; fi; 
+if [ -z ${NP_COV+x} ]; then echo "-m $MISSING"; echo "$USAGE"; exit 1; fi;
+if [ -z ${ILM_ASMB+x} ]; then echo "-s $MISSING"; echo "$USAGE"; exit 1; fi; 
+if [ -z ${ILM_COV+x} ]; then echo "-i $MISSING"; echo "$USAGE"; exit 1; fi;
+if [ -z ${THREADS+x} ]; then THREADS=10; fi;
+if [ -z ${NP_MINLENGTH+x} ]; then NP_MINLENGTH=8000; fi;
+if [ -z ${KEEP+x} ]; then KEEP="NO"; fi;
+
+### Data names
+NP_ASMBF=`cat $NP_ASMB`
+NP_ALL=`printf "$NP_COV""\n""$NP_ASMBF""\n" | sort | uniq`
+
+### Path to dependencies
+. $MMLONG_DIR/mmlong_tools/dependencies.sh
+
+################################################################################
+### Log settings ---------------------------------------------------------------
+################################################################################
+
+  LOG_NAME="mmlong_hybrid-metaflow_log_$(date +%s).txt"
+  exec > >(tee -a $LOG_NAME)
+  exec 2>&1
+  echo "mmlong hybrid-metaflow log" >> $LOG_NAME
+  echo "Script start: $(date)" >> $LOG_NAME
+  echo "Settings:
+  Script version: 	$VERSION
+  Script call: 		$0 $*
+  Data directory:	$DATA_DIR
+  Nanopore asmb list:	$NP_ASMB
+  Nanopore cov list:	$NP_COV
+  Illumina asmb list:   $ILM_ASMB
+  Illumina cov list:    $ILM_COV
+  CPU threads:		$THREADS
+  Nanopore minlength:   $NP_MINLENGTH
+  Run using -k:   	$KEEP" >> $LOG_NAME
+
+################################################################################
+### Workflow -------------------------------------------------------------------
+################################################################################
+
+### Read trimming and filtering-------------------------------------------------
+if [ ! -d "trimmed_data" ]; then
+printf "\n# Read trimming and filtering-------------------------------------\n\n"
+mkdir -p trimmed_data
+
+# Illumina data
+for DATA_PREFIX in $(echo "$ILM_COV")
+do
+  printf "\nIllumina quality filtering and trimming of [$DATA_PREFIX]\n\n"
+  $CUTADAPT --interleaved -a $NEX_ADP1 -a $TRU_ADP1 -A $NEX_ADP2 \
+  -A $TRU_ADP2 -j $THREADS -m 100 -q 20 \
+  -o trimmed_data/${DATA_PREFIX}_ilmtrim.fq \
+  $DATA_DIR/${DATA_PREFIX}_[rR]1.f* $DATA_DIR/${DATA_PREFIX}_[rR]2.f*
+done
+
+# Nanopore data
+for DATA_PREFIX in $NP_ALL
+do
+  printf "\nNanopore filtering and trimming of [$DATA_PREFIX]\n\n"
+  # Divide threads to Porechop jobs 
+  PORETHREADS=$(($THREADS*100000000/$(stat -L --printf="%s" $DATA_DIR/$DATA_PREFIX.f*)))
+  if [ "$PORETHREADS" -eq "0" ]; then PORETHREADS=1; fi;
+  if [ "$PORETHREADS" -gt $THREADS ]; then PORETHREADS=$THREADS; fi;
+  cat $DATA_DIR/$DATA_PREFIX.f* | $PARALLEL --progress -j $THREADS \
+  -L 4 --round-robin --pipe "cat > trimmed_data/{#}.tmp; \
+  $FILTLONG --min_length $NP_MINLENGTH --min_mean_q 80 trimmed_data/{#}.tmp \
+  > trimmed_data/{#}_filt.tmp; \
+  $PORECHOP -i trimmed_data/{#}_filt.tmp -o trimmed_data/{#}_trim.tmp \
+  --threads $PORETHREADS --min_split_read_size $NP_MINLENGTH --check_reads 1000; \
+  $FILTLONG --min_length $NP_MINLENGTH --min_mean_q 80 trimmed_data/{#}_trim.tmp \
+  > trimmed_data/{#}_trimfilt.tmp;"
+  cat trimmed_data/*_trimfilt.tmp > trimmed_data/${DATA_PREFIX}_nptrim.fq
+  rm trimmed_data/*.tmp
+done
+fi
+
+### Metagenome assembly --------------------------------------------------------
+if [ ! -d "metagenome_assembly" ]; then
+printf "\n# Nanopore metagenome assembly and polishing----------------------\n\n"
+mkdir -p metagenome_assembly
+
+# Assembly and polishing
+$MMLONG_WTDBG2 -d trimmed_data \
+  -a <(cat $NP_ASMB | sed 's/$/_nptrim/') \
+  -o metagenome_assembly -l 5000 -t $THREADS
+fi
+
+### Metagenome mapping ---------------------------------------------------------
+if [ ! -d "metagenome_mapping" ]; then
+printf "\n# Estimating assembly read coverage and putativ contig links -----\n\n"
+mkdir -p metagenome_mapping
+
+# Nanopore mapping
+for DATA_PREFIX in $NP_COV
+do
+  printf "\nNanopore read mapping of [$DATA_PREFIX]\n\n"
+  $MINIMAP2 -ax map-ont -t $THREADS metagenome_assembly/long_assembly.fa \
+  trimmed_data/${DATA_PREFIX}_nptrim.fq | \
+  $SAMTOOLS view -@ $THREADS -Sb -F 0x104 - |\
+  $SAMTOOLS sort -@ $THREADS - > metagenome_mapping/${DATA_PREFIX}_cov.bam
+  # $SAMTOOLS view: -q 5 = min map quality; -F 0x104 = exclude unmapped and 
+  # secondary hits
+done
+
+# Illumina mapping
+for DATA_PREFIX in $ILM_COV
+do
+  printf "\nIllumina read mapping of [$DATA_PREFIX]\n\n"
+  $MINIMAP2 -ax sr -t $THREADS metagenome_assembly/long_assembly.fa \
+  trimmed_data/${DATA_PREFIX}_ilmtrim.fq | \
+  $SAMTOOLS view -@ $THREADS -Sb -F 0x104 - |\
+  $SAMTOOLS sort -@ $THREADS - > metagenome_mapping/${DATA_PREFIX}_cov.bam
+done
+
+# Read coverage in windows
+find  metagenome_mapping/ -name '*_cov.bam' |\
+$PARALLEL --progress -j$THREADS "$MMLONG_READCOVERAGE -d {} -m bam -o metagenome_mapping -t 1 -w 500"
+
+# Assembly connections
+printf "\nExtract putative inter contig links from assembly graph\n\n"
+echo "scaffold1,scaffold2,connections" > metagenome_assembly/asmb_link.csv
+cat metagenome_assembly/assembly_miniasm.gfa | \
+grep -P "^L\tutg[0-9]{1,6}l" | \
+cut -f2,4 | sed -e 's/utg0*//g' -e 's/l\t/,/g' -e 's/l$//g' -e 's/$/,5/' \
+>> metagenome_assembly/asmb_link.csv
+
+# Nanopore connections for assembly datasets
+for DATA_PREFIX in $NP_ASMBF
+do
+  printf "\nExtract putative inter contig Nanopore links from [$DATA_PREFIX]\n\n"
+  $MMLONG_LINKS -a metagenome_assembly/long_assembly.fa \
+  -d trimmed_data/${DATA_PREFIX}_nptrim.fq -m np -l 2000 -e 3000000 -o metagenome_mapping -t $THREADS
+done
+
+# Illumina connections for assembly datasets
+for DATA_PREFIX in $ILM_ASMB
+do
+  printf "\nExtract putative inter contig Illumina links from [$DATA_PREFIX]\n\n"
+  $MMLONG_LINKS -a metagenome_assembly/long_assembly.fa \
+  -d metagenome_mapping/${DATA_PREFIX}_cov.bam -m bam -e 3000000 -o metagenome_mapping -t $THREADS
+done
+
+# Nanopore connections for coverage datasets
+for DATA_PREFIX in $NP_COV
+do
+  printf "\nExtract putative inter contig Nanopore links from [$DATA_PREFIX]\n\n"
+  $MMLONG_LINKS -a metagenome_assembly/long_assembly.fa \
+  -d trimmed_data/${DATA_PREFIX}_nptrim.fq -m np -l 2000 -e 3000000 -o metagenome_mapping/np_all_links -t $THREADS -n 1
+done
+
+echo "scaffold1,scaffold2,position1,position2,connections" > metagenome_mapping/np_all_link.csv
+cat metagenome_mapping/np_all_links/*_link.csv |\
+sed '/scaffold1,scaffold2,position1,position2,connections/d' |\
+awk -F"," '{a[$1","$2","$3","$4] += $5} END {for (i in a) if (a[i] >= 2) print i","a[i]}' \
+>> metagenome_mapping/np_all_link.csv
+
+# Illumina connections for coverage datasets
+for DATA_PREFIX in $ILM_COV
+do
+  printf "\nExtract putative inter contig Illumina links from [$DATA_PREFIX]\n\n"
+  $MMLONG_LINKS -a metagenome_assembly/long_assembly.fa \
+  -d metagenome_mapping/${DATA_PREFIX}_cov.bam -m bam -e 3000000 -o metagenome_mapping/ilm_all_links -t $THREADS -n 1
+done
+
+echo "scaffold1,scaffold2,position1,position2,connections" > metagenome_mapping/ilm_all_link.csv
+cat metagenome_mapping/ilm_all_links/*_link.csv |\
+sed '/scaffold1,scaffold2,position1,position2,connections/d' |\
+awk -F"," '{a[$1","$2","$3","$4] += $5} END {for (i in a) if (a[i] >= 2) print i","a[i]}' \
+>> metagenome_mapping/ilm_all_link.csv
+fi
+
+### Automatic binning ---------------------------------------------------------
+if [ ! -d "metagenome_autobinning" ]; then
+printf "\n# Automatic binning with metabat2 ------------------------------\n\n" 
+mkdir -p metagenome_autobinning
+mkdir -p metagenome_autobinning/bins
+$METABAT2_COV --outputDepth metagenome_autobinning/depth.txt metagenome_mapping/*_cov.bam
+$METABAT2 -i metagenome_assembly/long_assembly.fa -a metagenome_autobinning/depth.txt \
+-o metagenome_autobinning/bins/bin
+echo "scaffold,auto_bin" > metagenome_autobinning/auto_bin.csv
+for ABIN in metagenome_autobinning/bins/*.fa; do
+  ABIN_NAME=${ABIN##*/}
+  ABIN_NAME=${ABIN_NAME%.*}
+  ABIN_NAME=${ABIN_NAME##*.}
+  awk -v bin_name="$ABIN_NAME" '/^>/{print substr($0,2) "," bin_name}' $ABIN \
+  >>  metagenome_autobinning/auto_bin.csv
+done
+fi
+
+### Metagenome annotation -----------------------------------------------------
+if [ ! -d "metagenome_annotation" ]; then
+mkdir -p metagenome_annotation
+mmlong basic-annotation -a metagenome_assembly/assembly_racon.fa -o metagenome_annotation -t $THREADS
+fi
+
+### Prepare for binning --------------------------------------------------------
+if [ ! -d "binning" ]; then
+printf "\n#Prepare binning folder -----------------------------------------\n\n"
+
+mkdir -p binning
+mkdir -p binning/data
+
+cp metagenome_assembly/long_assembly.fa binning/data/
+cp metagenome_assembly/circular.csv binning/data/
+cp metagenome_mapping/*_cov.csv binning/data/
+cp metagenome_mapping/*_link.csv binning/data/
+cp metagenome_annotation/tax.csv binning/data/
+cp metagenome_annotation/essential.csv binning/data/
+cp metagenome_annotation/ssu_tax.csv binning/data/
+cp metagenome_annotation/ssu_count.csv binning/data/
+cp metagenome_annotation/ssu_gene.fa binning/data/
+cp metagenome_autobinning/auto_bin.csv binning/data
+fi
+
+### Cleanup --------------------------------------------------------------------
+if [ "$KEEP" = "NO" ]; then
+  printf "\n#Remove temporary files ---------------------------------------\n\n"
+  rm -rf ./metagenome_annotation
+  rm -rf ./metagenome_assembly
+  rm -f ./metagenome_mapping/*.csv
+fi
+
+################################################################################
+### Exit -----------------------------------------------------------------------
+################################################################################
+printf "\n##### Processing done $(date) #####\n\n"
+exit 0
+
+################################################################################
+### Testing --------------------------------------------------------------------
+################################################################################
+
+
+

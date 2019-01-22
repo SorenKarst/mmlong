@@ -1,0 +1,120 @@
+#!/bin/bash
+# mmlong wtdbg2
+# By Søren Karst and Rasmus Kirkegaard
+# Version
+WTDBG2_VERSION=0.1.0
+
+################################################################################
+### Preparation ----------------------------------------------------------------
+################################################################################
+
+### Description ----------------------------------------------------------------
+
+USAGE="$(basename "$0") [-h] [-d folder -a file -o folder -l value -r value -t value -x] 
+-- mmlong wtdbg2 v. $WTDBG2_VERSION: Perform long read assembly using wtdbg2
+                                  followed by wtpoa-cns polishing.
+
+where:
+    -h  Show this help text.
+    -d  Read data folder.
+    -a  List of read data files to use.
+    -o  Output folder. 
+    -l  Minimum read length.
+    -t  Number of threads. Default is 40.
+"
+
+### Terminal Arguments ---------------------------------------------------------
+
+# Import user arguments
+while getopts ':hzd:a:o:l:t:' OPTION; do
+  case $OPTION in
+    h) echo "$USAGE"; exit 1;;
+    d) DATA_DIR=$OPTARG;;
+    a) DATA_LIST=`cat $OPTARG`;;
+    o) OUT_DIR=$OPTARG;;
+    l) MIN_LENGTH=$OPTARG;;
+    t) THREADS=$OPTARG;;
+    :) printf 'missing argument for -$OPTARG\n' >&2; exit 1;;
+    \?) printf 'invalid option for -$OPTARG\n' >&2; exit 1;;
+  esac
+done
+
+# Check missing arguments
+MISSING="is missing but required. Exiting."
+if [ -z ${XRUN+x} ]; then
+  if [ -z ${DATA_DIR+x} ]; then
+    printf "\n -d not defined. Specify path to bin folder.\n\n"
+    echo "$USAGE"
+    exit 1
+  fi
+  if [ -z ${DATA_LIST+x} ]; then
+    printf "\n -a not defined. Specify list of data files to use for assembly.\n\n"
+    echo "$USAGE"
+    exit 1
+  fi
+  if [ -z ${OUT_DIR+x} ]; then
+    printf "\n -o not defined. Specify output folder.\n\n"
+    echo "$USAGE"
+    exit 1
+  fi
+fi
+if [ -z ${MIN_LENGTH+x} ]; then MIN_LENGTH=1000; fi;
+if [ -z ${THREADS+x} ]; then THREADS=40; fi;
+
+### Path to dependencies
+. $MMLONG_DIR/mmlong_tools/dependencies.sh
+
+################################################################################
+### Log settings ---------------------------------------------------------------
+################################################################################
+
+function logging {
+  LOG_NAME="mmlong_wtdbg2_log_$(date +%s).txt"
+  exec > >(tee -a $OUT_DIR/$LOG_NAME)
+  exec 2>&1
+  echo "mmlong wtdbg2 log" >> $OUT_DIR/$LOG_NAME
+  echo "Script start: $(date)" >> $OUT_DIR/$LOG_NAME
+  echo "Settings:
+  Script version: 	$WTDBG2_VERSION
+  Script call: 		$0 $*
+  Data directory:	$DATA_DIR
+  Data list:		$DATA_LIST
+  Output directory:	$OUT_DIR
+  Minimum contig length:$MIN_LENGTH
+  CPU threads:		$THREADS" >> $OUT_DIR/$LOG_NAME
+}
+
+
+################################################################################
+### Workflow -------------------------------------------------------------------
+################################################################################
+
+# wtdbg2 assembly and wtpoa-cns polishing
+printf "\nwtdbg2 assembly using [`echo ${DATA_LIST} | tr -d '\n'`] \n\n"
+
+# Preparation
+mkdir -p ${OUT_DIR}
+logging
+
+# Concatenate assembly data
+printf "\nConcatenate read data\n\n"
+if [[ ! -f "${OUT_DIR}/np_all.fq" && -n "${DATA_LIST}" ]]; then
+  cat $(echo "${DATA_LIST}" | sed -e "s/^/${DATA_DIR}\\//" -e "s/$/.f*/" ) > ${OUT_DIR}/np_all.fq
+fi
+
+# Assembly
+printf "\nwtdbg2 de novo assembly\n\n"
+$WTDBG2 -t $THREADS -i ${OUT_DIR}/np_all.fq -o ${OUT_DIR}/wtdbg2 -L ${MIN_LENGTH}
+# Polish
+$WTPOA_CNS -t $THREADS -i ${OUT_DIR}/wtdbg2.ctg.lay -o ${OUT_DIR}/wtdbg2.ctg.lay.fa
+# Format output
+awk  '!/^>/ { printf "%s", $0; n = "\n" } 
+  /^>/ {print n ">" ++i; n = ""}
+  END { printf "%s", n } 
+' ${OUT_DIR}/wtdbg2.ctg.lay.fa > ${OUT_DIR}/long_assembly.fa
+
+################################################################################
+### Exit -----------------------------------------------------------------------
+################################################################################
+echo "Script end: $(date)" >> $OUT_DIR/$LOG_NAME
+exit 0
